@@ -1,0 +1,24 @@
+# requirements.txt
+# ─────────────────────────────────────────────────────────────────────
+# Install everything with: pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────
+
+# FastAPI — the web framework that runs the webhook server
+fastapi
+
+# Uvicorn — the server that actually runs FastAPI
+# "standard" includes useful extras like auto-reload support
+uvicorn[standard]
+
+# asyncpg — async PostgreSQL driver for connecting to Neon
+asyncpg
+
+# openai — the official OpenAI Python client
+# handles API calls, tool calling, and async support
+openai
+
+# httpx — async HTTP client for sending WhatsApp messages via Meta API
+httpx
+
+# python-dotenv — reads your .env file and loads it into the environment
+python-dotenv

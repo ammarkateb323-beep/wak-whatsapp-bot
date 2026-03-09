@@ -1,0 +1,10 @@
+# Secret environment variables — NEVER commit this
+.env
+
+# Python cache files — generated automatically, not needed in repo
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac OS system file — not needed in repo
+.DS_Store
