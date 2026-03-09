@@ -44,6 +44,9 @@ WHATSAPP_PHONE_ID = os.getenv("WHATSAPP_PHONE_ID")
 # You choose this string — it just needs to match on both sides.
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 
+DASHBOARD_URL = os.getenv("DASHBOARD_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+
 
 # ── Memory Settings ───────────────────────────────────────────────────
 
@@ -64,6 +67,8 @@ _required = {
     "WHATSAPP_TOKEN": WHATSAPP_TOKEN,
     "WHATSAPP_PHONE_ID": WHATSAPP_PHONE_ID,
     "VERIFY_TOKEN": VERIFY_TOKEN,
+    "DASHBOARD_URL": DASHBOARD_URL,
+    "WEBHOOK_SECRET": WEBHOOK_SECRET,
 }
 
 for _name, _value in _required.items():

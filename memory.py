@@ -61,8 +61,12 @@ async def load_history(customer_phone: str) -> list[dict]:
     # Each row becomes: {"role": "user"|"assistant", "content": "..."}
     return [
         {
-            "role": row["role"],              # "user" or "assistant"
-            "content": row["message_text"],   # the actual message text
+            "role": (
+                "user"
+                if row["role"] == "customer"
+                else "assistant"
+            ),
+            "content": row["message_text"],
         }
         for row in rows
     ]
@@ -70,36 +74,36 @@ async def load_history(customer_phone: str) -> list[dict]:
 
 async def save_message(
     customer_phone: str,
-    direction: str,  # "inbound" (from customer) or "outbound" (from bot)
-    role: str,       # "user" (for OpenAI history) or "assistant"
+    direction: str,
     message_text: str,
+    sender: str = None,
 ):
     """
     Saves a single message to the messages table.
 
-    Called twice after every exchange:
-        1. To save the customer's message  (direction=inbound,  role=user)
-        2. To save the bot's reply         (direction=outbound, role=assistant)
-
-    The direction column tells you who sent it in plain terms.
-    The role column matches OpenAI's naming so load_history() works correctly.
+    Called after every exchange to save the customer's message and the
+    bot's reply. The optional sender override is used for human agent
+    replies coming from the dashboard.
 
     Args:
         customer_phone: The customer's WhatsApp number
         direction:      "inbound" or "outbound"
-        role:           "user" or "assistant"
         message_text:   The actual message content
+        sender:         Optional explicit sender override
     """
+    if sender is None:
+        sender = "customer" if direction == "inbound" else "ai"
+
     async with database.pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO messages (customer_phone, direction, sender, message_text, created_at)
             VALUES ($1, $2, $3, $4, NOW())
             """,
-            customer_phone,  # $1
-            direction,       # $2 — "inbound" or "outbound"
-            role,            # $3 — "user" or "assistant" (stored in sender column)
-            message_text,    # $4
+            customer_phone,
+            direction,
+            sender,
+            message_text,
         )
         # NOW() is a PostgreSQL function that inserts the current timestamp.
         # We let the DB set the time rather than Python to avoid timezone

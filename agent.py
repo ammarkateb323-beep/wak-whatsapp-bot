@@ -1,13 +1,53 @@
 import json
+import httpx
 import openai
 
 import database
 import memory
-from config import OPENAI_API_KEY, OPENAI_MODEL
+from config import DASHBOARD_URL, OPENAI_API_KEY, OPENAI_MODEL, WEBHOOK_SECRET
 
 # Initialise the OpenAI client with your API key.
 # This client is reused for every call - no need to recreate it each time.
 client = openai.AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+
+async def notify_dashboard(
+    event: str,
+    customer_phone: str,
+    message_text: str,
+    escalation_reason: str = None,
+):
+    """
+    Notifies the dashboard of a new message or escalation.
+    Fires and forgets — never blocks or crashes the main flow.
+
+    event: "message" or "escalation"
+    """
+    try:
+        if event == "message":
+            url = f"{DASHBOARD_URL}/api/incoming"
+            payload = {
+                "customer_phone": customer_phone,
+                "message_text": message_text,
+            }
+        elif event == "escalation":
+            url = f"{DASHBOARD_URL}/api/escalate"
+            payload = {
+                "customer_phone": customer_phone,
+                "escalation_reason": escalation_reason,
+            }
+        else:
+            return
+
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                url=url,
+                json=payload,
+                headers={"x-webhook-secret": WEBHOOK_SECRET},
+                timeout=5.0,
+            )
+    except Exception:
+        pass
 
 
 # This is sent with every OpenAI call as the first message with
@@ -111,6 +151,13 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
     # follow STEP 0 and send the opening message.
     history = await memory.load_history(customer_phone)
 
+    # Notify dashboard of incoming customer message
+    await notify_dashboard(
+        event="message",
+        customer_phone=customer_phone,
+        message_text=new_message,
+    )
+
     # Step 2: Build the message list
     # The system prompt always comes first - it frames everything after it.
     messages = (
@@ -187,19 +234,51 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
         # complaints, product inquiries, etc.
         final_reply = response_message.content
 
+    # Notify dashboard of the new outbound message
+    await notify_dashboard(
+        event="message",
+        customer_phone=customer_phone,
+        message_text=final_reply,
+    )
+
+    # Check if this is a handoff phrase — if so, create escalation
+    ESCALATION_PHRASES = [
+        "a member of our team will be in touch",
+        "a specialist will be in touch",
+        "a team member will be with",
+        "the team will follow up",
+        "سيتواصل معك أحد أعضاء فريقنا",
+        "سيكون أحد أعضاء الفريق",
+        "سيتابع الفريق",
+        "متخصص سيتواصل",
+    ]
+
+    final_reply_lower = final_reply.lower()
+    is_escalation = any(phrase.lower() in final_reply_lower for phrase in ESCALATION_PHRASES)
+
+    if is_escalation:
+        await database.create_escalation(
+            customer_phone=customer_phone,
+            escalation_reason=final_reply[:200],
+        )
+        await notify_dashboard(
+            event="escalation",
+            customer_phone=customer_phone,
+            message_text=final_reply,
+            escalation_reason=final_reply[:200],
+        )
+
     # Step 6: Save the exchange to memory
     # Save both the customer's message and the bot's reply to the
     # messages table so future calls have accurate history.
     await memory.save_message(
         customer_phone=customer_phone,
         direction="inbound",
-        role="user",
         message_text=new_message,
     )
     await memory.save_message(
         customer_phone=customer_phone,
         direction="outbound",
-        role="assistant",
         message_text=final_reply,
     )
 

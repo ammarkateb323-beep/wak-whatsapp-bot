@@ -89,3 +89,25 @@ async def lookup_order(order_number: str) -> dict:
         "details": row["details"],
         "created_at": str(row["created_at"]),
     }
+
+
+async def create_escalation(customer_phone: str, escalation_reason: str):
+    """
+    Inserts or updates an escalation record for a customer.
+    Called when the AI sends a handoff phrase.
+    Uses ON CONFLICT to avoid duplicates if the customer escalates twice.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO escalations (customer_phone, escalation_reason, status, created_at)
+            VALUES ($1, $2, 'open', NOW())
+            ON CONFLICT (customer_phone)
+            DO UPDATE SET
+                escalation_reason = EXCLUDED.escalation_reason,
+                status = 'open',
+                created_at = NOW()
+            """,
+            customer_phone,
+            escalation_reason,
+        )

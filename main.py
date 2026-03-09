@@ -6,8 +6,9 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 import agent
 import database
+import memory
 import whatsapp
-from config import VERIFY_TOKEN
+from config import VERIFY_TOKEN, WEBHOOK_SECRET
 
 # Basic logging setup so we can see what's happening in the terminal.
 logging.basicConfig(
@@ -100,6 +101,38 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(process_message, customer_phone, message_text)
     return JSONResponse(content={"status": "ok"}, status_code=200)
+
+
+@app.post("/send")
+async def send_agent_message(request: Request):
+    """
+    Called by the agent dashboard when the agent sends a reply.
+    Validates the webhook secret, sends the message via WhatsApp,
+    and saves it to the messages table with sender = 'agent'.
+    """
+    secret = request.headers.get("x-webhook-secret")
+    if secret != WEBHOOK_SECRET:
+        return JSONResponse(content={"error": "Forbidden"}, status_code=403)
+
+    body = await request.json()
+    customer_phone = body.get("customer_phone")
+    message_text = body.get("message")
+
+    if not customer_phone or not message_text:
+        return JSONResponse(content={"error": "Missing fields"}, status_code=400)
+
+    try:
+        await whatsapp.send_message(to=customer_phone, text=message_text)
+        await memory.save_message(
+            customer_phone=customer_phone,
+            direction="outbound",
+            message_text=message_text,
+            sender="agent",
+        )
+        return JSONResponse(content={"status": "sent"}, status_code=200)
+    except Exception as exc:
+        logger.error("Failed to send agent message: %s", exc)
+        return JSONResponse(content={"error": str(exc)}, status_code=500)
 
 
 async def process_message(customer_phone: str, message_text: str):
