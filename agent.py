@@ -241,32 +241,10 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
         message_text=final_reply,
     )
 
-    # Check if this is a handoff phrase — if so, create escalation
-    ESCALATION_PHRASES = [
-        "a member of our team will be in touch",
-        "a specialist will be in touch",
-        "a team member will be with",
-        "the team will follow up",
-        "سيتواصل معك أحد أعضاء فريقنا",
-        "سيكون أحد أعضاء الفريق",
-        "سيتابع الفريق",
-        "متخصص سيتواصل",
-    ]
-
-    final_reply_lower = final_reply.lower()
-    is_escalation = any(phrase.lower() in final_reply_lower for phrase in ESCALATION_PHRASES)
-
-    if is_escalation:
-        await database.create_escalation(
-            customer_phone=customer_phone,
-            escalation_reason=final_reply[:200],
-        )
-        await notify_dashboard(
-            event="escalation",
-            customer_phone=customer_phone,
-            message_text=final_reply,
-            escalation_reason=final_reply[:200],
-        )
+    await database.create_escalation(
+        customer_phone=customer_phone,
+        escalation_reason="Active conversation",
+    )
 
     # Step 6: Save the exchange to memory
     # Save both the customer's message and the bot's reply to the
