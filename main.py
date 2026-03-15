@@ -144,7 +144,7 @@ async def process_message(customer_phone: str, message_text: str):
     try:
         logger.info("Processing message from %s...", customer_phone)
 
-        reply = await agent.get_reply(
+        reply, meeting_message = await agent.get_reply(
             customer_phone=customer_phone,
             new_message=message_text,
         )
@@ -152,6 +152,17 @@ async def process_message(customer_phone: str, message_text: str):
 
         await whatsapp.send_message(to=customer_phone, text=reply)
         logger.info("Reply sent to %s successfully.", customer_phone)
+
+        # If a meeting was just created, send the invitation as a separate message.
+        if meeting_message:
+            await whatsapp.send_message(to=customer_phone, text=meeting_message)
+            await memory.save_message(
+                customer_phone=customer_phone,
+                direction="outbound",
+                message_text=meeting_message,
+                sender="ai",
+            )
+            logger.info("Meeting invitation sent to %s.", customer_phone)
 
     except Exception as exc:
         logger.error(

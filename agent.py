@@ -121,6 +121,21 @@ def invalidate_prompt_cache() -> None:
     _cached_prompt = None
 
 
+# Phrases that signal the bot has closed a conversation topic and a
+# meeting offer should be sent to the customer.
+_RESOLUTION_PHRASES = [
+    "specialist will be in touch",
+    "a member of our team will",
+    "the team will follow up",
+    "will be in touch shortly",
+]
+
+
+def _is_resolved(reply: str) -> bool:
+    lower = reply.lower()
+    return any(phrase in lower for phrase in _RESOLUTION_PHRASES)
+
+
 # This tells OpenAI what tools are available to it.
 # It's a list because you can define multiple tools - we only need one.
 #
@@ -148,28 +163,56 @@ TOOLS = [
                 # the tool without it
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_meeting_time",
+            "description": (
+                "Confirm and save the date and time the customer has chosen for their video meeting. "
+                "Call this when the customer replies with their preferred date and time for the meeting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "meeting_id": {
+                        "type": "integer",
+                        "description": "The ID of the pending meeting to update.",
+                    },
+                    "agreed_time": {
+                        "type": "string",
+                        "description": "The date and time the customer specified, e.g. 'Monday 10 AM', 'March 20 at 3 PM'.",
+                    },
+                },
+                "required": ["meeting_id", "agreed_time"],
+            },
+        },
+    },
 ]
 
 
-async def get_reply(customer_phone: str, new_message: str) -> str:
+async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | None]:
     """
     The main entry point for the agent. Called by main.py for every
     incoming WhatsApp message.
 
     Full flow:
         1. Load conversation history from the messages table
-        2. Build the full message list for OpenAI
-        3. Call OpenAI
-        4. If OpenAI wants to use a tool -> run it -> call OpenAI again
-        5. Return the final text reply
+        2. Check for a pending meeting (for date/time confirmation)
+        3. Build the full message list for OpenAI
+        4. Call OpenAI
+        5. If OpenAI wants to use a tool -> run it -> call OpenAI again
+        6. Save the exchange to memory
+        7. If conversation resolved, generate a meeting link
+        8. Return (final_reply, meeting_message)
 
     Args:
         customer_phone: The customer's WhatsApp number (e.g. "971501234567")
         new_message:    The text the customer just sent
 
     Returns:
-        The bot's reply as a plain string, ready to send via WhatsApp.
+        A tuple of (reply, meeting_message).
+        meeting_message is a string if a meeting was just created, else None.
     """
     # Step 1: Load history
     # Fetch the last 20 messages for this customer from the messages table.
@@ -184,19 +227,33 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
         message_text=new_message,
     )
 
-    # Step 2: Build the message list
+    # Step 2: Check for a pending meeting so the AI can handle date/time replies.
+    pending_meeting = await database.get_pending_meeting(customer_phone)
+
+    # Step 3: Build the message list
     # The system prompt always comes first - it frames everything after it.
+    # If the customer has a pending meeting, append a note so the AI knows
+    # to call confirm_meeting_time when they reply with a date and time.
+    system_content = await get_system_prompt()
+    if pending_meeting:
+        system_content = system_content + (
+            f"\n\nNOTE: This customer has a pending video meeting (Meeting ID: {pending_meeting['id']}, "
+            f"Link: {pending_meeting['meeting_link']}). If their message contains a preferred date and "
+            f"time for the meeting, call the confirm_meeting_time tool with the meeting_id and the "
+            f"agreed_time, then confirm the booking warmly."
+        )
+
     messages = (
-        [{"role": "system", "content": await get_system_prompt()}]  # system prompt first
+        [{"role": "system", "content": system_content}]  # system prompt first
         + history  # past conversation
         + [{"role": "user", "content": new_message}]  # customer's new message
     )
 
-    # Step 3: First OpenAI call
+    # Step 4: First OpenAI call
     response = await client.chat.completions.create(
         model=OPENAI_MODEL,  # "gpt-4.1-mini" from config.py
         messages=messages,  # full conversation so far
-        tools=TOOLS,  # the lookup_order tool definition
+        tools=TOOLS,  # lookup_order + confirm_meeting_time
         tool_choice="auto",  # let OpenAI decide when to use the tool
     )
 
@@ -204,9 +261,8 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
     # response_message contains either a text reply or a tool_call request.
     response_message = response.choices[0].message
 
-    # Step 4: Handle tool call (if any)
+    # Step 5: Handle tool call (if any)
     # Check if OpenAI wants to call a tool instead of replying directly.
-    # This happens when the customer provides an order number to track.
     if response_message.tool_calls:
         # There could be multiple tool calls in theory, but in our
         # flow there will only ever be one - we loop anyway for safety.
@@ -218,13 +274,19 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
             # They come as a JSON string - we parse them into a dict.
             function_args = json.loads(tool_call.function.arguments)
 
-            # Run the actual database lookup.
-            # We only have one tool, but we use an if-check here so
-            # it's easy to add more tools later without restructuring.
             if function_name == "lookup_order":
                 tool_result = await database.lookup_order(
                     order_number=function_args["order_number"]
                 )
+            elif function_name == "confirm_meeting_time":
+                await database.update_meeting_time(
+                    meeting_id=function_args["meeting_id"],
+                    agreed_time=function_args["agreed_time"],
+                )
+                tool_result = {
+                    "confirmed": True,
+                    "agreed_time": function_args["agreed_time"],
+                }
             else:
                 # Unknown tool - return an error message to OpenAI
                 # so it can handle it gracefully in its reply.
@@ -243,8 +305,7 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
                 }
             )
 
-        # Step 5: Second OpenAI call
-        # Now call OpenAI again with the tool result included.
+        # Step 5b: Second OpenAI call with the tool result included.
         second_response = await client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=messages,  # now includes the tool result
@@ -274,4 +335,19 @@ async def get_reply(customer_phone: str, new_message: str) -> str:
         message_text=final_reply,
     )
 
-    return final_reply
+    # Step 7: If the conversation was just resolved and no pending meeting
+    # exists yet, generate a Jitsi link and prepare the invitation message.
+    meeting_message: str | None = None
+    if _is_resolved(final_reply) and not pending_meeting:
+        try:
+            link = await database.create_meeting(customer_phone)
+            meeting_message = (
+                f"Thank you for contacting WAK Solutions! Would you like to schedule a "
+                f"video meeting with one of our team? Here is your personal meeting link: "
+                f"{link} — please reply with your preferred date and time and we will "
+                f"confirm shortly."
+            )
+        except Exception as e:
+            print(f"[agent] Failed to create meeting: {e}", flush=True)
+
+    return final_reply, meeting_message

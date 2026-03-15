@@ -1,4 +1,6 @@
 import asyncpg
+import random
+import string
 from config import DATABASE_URL
 
 
@@ -89,6 +91,61 @@ async def lookup_order(order_number: str) -> dict:
         "details": row["details"],
         "created_at": str(row["created_at"]),
     }
+
+
+async def create_meeting(customer_phone: str) -> str:
+    """
+    Generates a unique Jitsi meeting link and inserts a meeting record.
+    Returns the meeting link.
+    """
+    rand = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+    link = f"https://meet.jit.si/WAK-{rand}"
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO meetings (customer_phone, meeting_link, status, created_at)
+            VALUES ($1, $2, 'pending', NOW())
+            """,
+            customer_phone,
+            link,
+        )
+    return link
+
+
+async def get_pending_meeting(customer_phone: str) -> dict | None:
+    """
+    Returns the latest pending meeting for a customer, or None.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, meeting_link, agreed_time
+            FROM meetings
+            WHERE customer_phone = $1 AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            customer_phone,
+        )
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "meeting_link": row["meeting_link"],
+        "agreed_time": row["agreed_time"],
+    }
+
+
+async def update_meeting_time(meeting_id: int, agreed_time: str) -> None:
+    """
+    Saves the date/time the customer agreed to for their pending meeting.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET agreed_time = $1 WHERE id = $2",
+            agreed_time,
+            meeting_id,
+        )
 
 
 async def create_escalation(customer_phone: str, escalation_reason: str):
