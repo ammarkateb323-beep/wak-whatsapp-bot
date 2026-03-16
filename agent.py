@@ -368,17 +368,23 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
     print(f"[DEBUG step7] _is_resolved={_is_resolved(final_reply)} pending_meeting={pending_meeting}", flush=True)
     if _is_resolved(final_reply):
         if pending_meeting and pending_meeting.get("scheduled_at") is None:
-            # Unbooked meeting already exists — resend the existing booking URL.
             token = pending_meeting.get("meeting_token")
-            print(f"[DEBUG step7] Resending existing token={token}", flush=True)
-            if token:
+            if not token:
+                # Stale row with no token — delete it and create a fresh one.
+                print(f"[DEBUG step7] Stale meeting (no token), deleting id={pending_meeting['id']}", flush=True)
+                async with database.pool.acquire() as _conn:
+                    await _conn.execute("DELETE FROM meetings WHERE id = $1", pending_meeting["id"])
+                pending_meeting = None  # fall through to create new below
+            else:
+                # Unbooked meeting already exists — resend the existing booking URL.
+                print(f"[DEBUG step7] Resending existing token={token}", flush=True)
                 booking_url = f"{DASHBOARD_URL}/book/{token}"
                 meeting_message = (
                     f"Thank you for contacting WAK Solutions! Would you like to schedule a "
                     f"video meeting with one of our team? Book your preferred time here: "
                     f"{booking_url}"
                 )
-        elif not pending_meeting:
+        if not pending_meeting:
             # No meeting yet — create a new booking token.
             print(f"[DEBUG step7] No pending meeting — calling create_meeting_with_token", flush=True)
             try:
