@@ -133,7 +133,9 @@ _RESOLUTION_PHRASES = [
 
 def _is_resolved(reply: str) -> bool:
     lower = reply.lower()
-    return any(phrase in lower for phrase in _RESOLUTION_PHRASES)
+    result = any(phrase in lower for phrase in _RESOLUTION_PHRASES)
+    print(f"[DEBUG _is_resolved] reply[:80]={reply[:80]!r} -> {result}", flush=True)
+    return result
 
 
 _MEETING_KEYWORDS = ["meeting", "book", "schedule", "appointment", "slot", "call"]
@@ -363,10 +365,12 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
     # booking link. If an unbooked pending meeting already exists, resend
     # its token (Bug 1 fix). Otherwise create a fresh one.
     meeting_message: str | None = None
+    print(f"[DEBUG step7] _is_resolved={_is_resolved(final_reply)} pending_meeting={pending_meeting}", flush=True)
     if _is_resolved(final_reply):
         if pending_meeting and pending_meeting.get("scheduled_at") is None:
             # Unbooked meeting already exists — resend the existing booking URL.
             token = pending_meeting.get("meeting_token")
+            print(f"[DEBUG step7] Resending existing token={token}", flush=True)
             if token:
                 booking_url = f"{DASHBOARD_URL}/book/{token}"
                 meeting_message = (
@@ -376,8 +380,10 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
                 )
         elif not pending_meeting:
             # No meeting yet — create a new booking token.
+            print(f"[DEBUG step7] No pending meeting — calling create_meeting_with_token", flush=True)
             try:
                 token = await database.create_meeting_with_token(customer_phone)
+                print(f"[DEBUG step7] create_meeting_with_token returned token={token}", flush=True)
                 booking_url = f"{DASHBOARD_URL}/book/{token}"
                 meeting_message = (
                     f"Thank you for contacting WAK Solutions! Would you like to schedule a "
@@ -385,6 +391,11 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
                     f"{booking_url}"
                 )
             except Exception as e:
-                print(f"[agent] Failed to create meeting token: {e}", flush=True)
+                import traceback
+                print(f"[DEBUG step7] create_meeting_with_token FAILED: {e}", flush=True)
+                print(traceback.format_exc(), flush=True)
+        else:
+            print(f"[DEBUG step7] Pending meeting already booked (scheduled_at={pending_meeting.get('scheduled_at')}) — skipping", flush=True)
+    print(f"[DEBUG step7] meeting_message={meeting_message!r}", flush=True)
 
     return final_reply, meeting_message
