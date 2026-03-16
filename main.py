@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,16 +19,41 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _link_delivery_loop():
+    """
+    Background task that runs every 60 seconds.
+    Sends Jitsi meeting links to customers whose meetings start within 15 minutes.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            meetings = await database.get_meetings_to_notify()
+            for m in meetings:
+                msg = f"Your meeting is starting soon! Join here: {m['meeting_link']}"
+                await whatsapp.send_message(to=m["customer_phone"], text=msg)
+                await database.mark_link_sent(m["id"])
+                logger.info("Sent meeting link to %s (meeting %s)", m["customer_phone"], m["id"])
+        except Exception as exc:
+            logger.error("Link delivery job error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     App startup/shutdown lifecycle.
-    Creates DB pool on startup and closes it on shutdown.
+    Creates DB pool on startup, starts link delivery job, closes on shutdown.
     """
     logger.info("Starting up - creating database connection pool...")
     await database.create_pool()
     logger.info("Database pool ready.")
+    delivery_task = asyncio.create_task(_link_delivery_loop())
+    logger.info("Meeting link delivery job started.")
     yield
+    delivery_task.cancel()
+    try:
+        await delivery_task
+    except asyncio.CancelledError:
+        pass
     logger.info("Shutting down - closing database connection pool...")
     await database.close_pool()
     logger.info("Database pool closed.")

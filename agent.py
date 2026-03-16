@@ -227,21 +227,12 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
         message_text=new_message,
     )
 
-    # Step 2: Check for a pending meeting so the AI can handle date/time replies.
+    # Step 2: Check if a pending meeting already exists so we don't
+    # send a second booking link for the same conversation.
     pending_meeting = await database.get_pending_meeting(customer_phone)
 
-    # Step 3: Build the message list
-    # The system prompt always comes first - it frames everything after it.
-    # If the customer has a pending meeting, append a note so the AI knows
-    # to call confirm_meeting_time when they reply with a date and time.
+    # Step 3: Build the message list.
     system_content = await get_system_prompt()
-    if pending_meeting:
-        system_content = system_content + (
-            f"\n\nNOTE: This customer has a pending video meeting (Meeting ID: {pending_meeting['id']}, "
-            f"Link: {pending_meeting['meeting_link']}). If their message contains a preferred date and "
-            f"time for the meeting, call the confirm_meeting_time tool with the meeting_id and the "
-            f"agreed_time, then confirm the booking warmly."
-        )
 
     messages = (
         [{"role": "system", "content": system_content}]  # system prompt first
@@ -336,18 +327,19 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
     )
 
     # Step 7: If the conversation was just resolved and no pending meeting
-    # exists yet, generate a Jitsi link and prepare the invitation message.
+    # exists yet, create a booking token and send the customer a link to
+    # choose their preferred time slot.
     meeting_message: str | None = None
     if _is_resolved(final_reply) and not pending_meeting:
         try:
-            link = await database.create_meeting(customer_phone)
+            token = await database.create_meeting_with_token(customer_phone)
+            booking_url = f"{DASHBOARD_URL}/book/{token}"
             meeting_message = (
                 f"Thank you for contacting WAK Solutions! Would you like to schedule a "
-                f"video meeting with one of our team? Here is your personal meeting link: "
-                f"{link} — please reply with your preferred date and time and we will "
-                f"confirm shortly."
+                f"video meeting with one of our team? Book your preferred time here: "
+                f"{booking_url}"
             )
         except Exception as e:
-            print(f"[agent] Failed to create meeting: {e}", flush=True)
+            print(f"[agent] Failed to create meeting token: {e}", flush=True)
 
     return final_reply, meeting_message

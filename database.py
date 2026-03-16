@@ -1,6 +1,8 @@
 import asyncpg
 import random
 import string
+import uuid
+from datetime import datetime, timezone, timedelta
 from config import DATABASE_URL
 
 
@@ -93,23 +95,26 @@ async def lookup_order(order_number: str) -> dict:
     }
 
 
-async def create_meeting(customer_phone: str) -> str:
+async def create_meeting_with_token(customer_phone: str) -> str:
     """
-    Generates a unique Jitsi meeting link and inserts a meeting record.
-    Returns the meeting link.
+    Creates a meeting record with a unique booking token.
+    The Jitsi link is generated later when the customer books a slot.
+    Returns the booking token (UUID).
     """
-    rand = "".join(random.choices(string.ascii_letters + string.digits, k=10))
-    link = f"https://meet.jit.si/WAK-{rand}"
+    token = str(uuid.uuid4())
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO meetings (customer_phone, meeting_link, status, created_at)
-            VALUES ($1, $2, 'pending', NOW())
+            INSERT INTO meetings
+              (customer_phone, meeting_link, meeting_token, token_expires_at, status, created_at)
+            VALUES ($1, '', $2, $3, 'pending', NOW())
             """,
             customer_phone,
-            link,
+            token,
+            expires_at,
         )
-    return link
+    return token
 
 
 async def get_pending_meeting(customer_phone: str) -> dict | None:
@@ -144,6 +149,36 @@ async def update_meeting_time(meeting_id: int, agreed_time: str) -> None:
         await conn.execute(
             "UPDATE meetings SET agreed_time = $1 WHERE id = $2",
             agreed_time,
+            meeting_id,
+        )
+
+
+async def get_meetings_to_notify() -> list[dict]:
+    """
+    Returns meetings that are within 15 minutes of their scheduled time,
+    have not had their link sent yet, and are not completed.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, customer_phone, meeting_link
+            FROM meetings
+            WHERE status != 'completed'
+              AND link_sent = FALSE
+              AND meeting_link != ''
+              AND scheduled_at IS NOT NULL
+              AND scheduled_at <= NOW() + INTERVAL '15 minutes'
+              AND scheduled_at >= NOW() - INTERVAL '30 minutes'
+            """
+        )
+    return [dict(r) for r in rows]
+
+
+async def mark_link_sent(meeting_id: int) -> None:
+    """Marks the Jitsi link as sent so it is not sent again."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE meetings SET link_sent = TRUE WHERE id = $1",
             meeting_id,
         )
 
