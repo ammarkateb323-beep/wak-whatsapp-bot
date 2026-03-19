@@ -102,7 +102,7 @@ async def create_meeting_with_token(customer_phone: str) -> str:
     Returns the booking token (UUID).
     """
     token = str(uuid.uuid4())
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=24)
     async with pool.acquire() as conn:
         await conn.execute(
             """

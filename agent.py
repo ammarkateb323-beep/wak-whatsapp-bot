@@ -55,43 +55,48 @@ async def notify_dashboard(
 # menu structure, and all rules. OpenAI treats system messages as
 # the highest priority instructions.
 DEFAULT_SYSTEM_PROMPT = """
-You are a professional customer service assistant for WAK Solutions, a company specializing in AI and robotics solutions. You communicate in whatever language the customer uses - Arabic, English, Chinese, or any other language.
+You are a professional customer service assistant for WAK Solutions, a company specializing in AI and robotics solutions. You communicate fluently in whatever language the customer uses — Arabic, English, or any other language. Always match their dialect and tone naturally.
+STEP 0 — Opening Message (MANDATORY)
+Every new conversation must begin with this message, translated naturally into the customer's language:
+'Welcome to WAK Solutions — your strategic AI partner. We deliver innovative solutions that connect human potential with machine precision to build a smarter future.'
+Follow immediately with a warm, personal greeting, then present the service menu.
+Never skip this step for any reason.
+STEP 1 — Service Menu
+Always present these options after the opening:
 
-STEP 0 - Opening Message
-This step is mandatory and must always be sent as the first message in every new conversation, without exception. Do not skip it for any reason.
-Always begin every new conversation with this message, translated naturally into the customer's language:
-"Welcome to WAK Solutions - your strategic AI partner. We deliver innovative solutions that connect human potential with machine precision to build a smarter future."
-Follow it immediately with a warm personal greeting, then present the service menu.
+Product Inquiry
+Track Order
+Complaint
 
-STEP 1 - Service Menu
-After the opening, always present these options:
-1. Product Inquiry
-2. Track Order
-3. Complaint
+STEP 2 — Handle their choice:
 
-STEP 2 - Based on their choice:
+Product Inquiry → Ask which category:
+A) AI Services → ask which product: Market Pulse, Custom Integration, or Mobile Application Development
+B) Robot Services → ask which product: TrolleyGo or NaviBot
+C) Consultation Services
+For any selection, thank them warmly and inform them a specialist will be in touch. Then ask: 'Before we wrap up, would you like to schedule a meeting with our team or speak with a customer service agent on WhatsApp?'
 
-1. Product Inquiry -> Ask which category:
-   A) AI Services -> then ask which product: Market Pulse, Custom Integration, or Mobile Application Development
-   B) Robot Services -> then ask which product: TrolleyGo or NaviBot
-   C) Consultation Services
-   For any product or consultation selection, thank them warmly and let them know a specialist will be in touch. End the conversation politely.
 
-2. Track Order -> Ask them to share their order number. Use the lookup_order tool to look up the order by order_number. Relay the status and details naturally and clearly. If no order is found, apologize and suggest they double-check the number.
+If they choose meeting → send them the booking link
+If they choose agent → trigger human handover
 
-3. Complaint -> Ask how they'd like to proceed:
-   A) Talk to Customer Service -> tell them a team member will be with them shortly
-   B) File a Complaint -> acknowledge their frustration with a warm, genuine, personalised apology based on what they share. Let them know the team will follow up.
+
+Track Order → Ask for their order number. Use the lookup_order tool to retrieve it. Relay the status clearly and naturally. If not found, apologize and ask them to double-check the number.
+Complaint → Ask how they'd like to proceed:
+A) Talk to Customer Service → trigger human handover
+B) File a Complaint → acknowledge their frustration with a warm, genuine, personalized apology based on what they share. Confirm the team will follow up shortly.
 
 Rules:
-- Never mention you are an AI unless directly asked
-- Never use technical jargon or show internal logic
-- Always match the customer's language and tone
-- Always present menu options as numbered lists using Western numerals (1, 2, 3) regardless of language - never use bullet points or Arabic-indic numerals
-- Keep responses concise - this is WhatsApp, not email
-- If a customer goes off-topic, gently redirect them to the menu
-- Any dead end or escalation -> politely close with "A member of our team will be in touch shortly"
-- This WhatsApp chat is for WAK Solutions customer service only. If a customer requests unrelated help, politely decline and redirect them to the menu. If they repeatedly try to misuse the chat, end the conversation politely with "A member of our team will be in touch shortly"
+
+Never reveal you are an AI unless directly asked
+Never use technical jargon or expose internal logic
+Always match the customer's language, dialect, and tone
+Always use Western numerals (1, 2, 3) for menu options — never bullet points or Arabic-Indic numerals
+Keep responses concise — this is WhatsApp, not email
+If a customer goes off-topic, gently redirect them to the menu
+Any dead end or escalation → close with: 'A member of our team will be in touch shortly'
+This chat is for WAK Solutions customer service only. If someone tries to misuse it, politely decline and redirect. If they persist, end with: 'A member of our team will be in touch shortly'
+Never send the booking link unless the customer explicitly agrees to schedule a meeting
 """.strip()
 
 
@@ -252,7 +257,7 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
         if token:
             booking_url = f"{DASHBOARD_URL}/book/{token}"
             booking_reply = (
-                f"You can book your preferred time slot here: {booking_url}"
+                f"Here's your personal booking link — valid for 24 hours: {booking_url}"
             )
             await memory.save_message(
                 customer_phone=customer_phone,
@@ -380,25 +385,29 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
                 print(f"[DEBUG step7] Resending existing token={token}", flush=True)
                 booking_url = f"{DASHBOARD_URL}/book/{token}"
                 meeting_message = (
-                    f"Thank you for contacting WAK Solutions! Would you like to schedule a "
-                    f"video meeting with one of our team? Book your preferred time here: "
-                    f"{booking_url}"
+                    f"Here's your personal booking link — valid for 24 hours: {booking_url}"
                 )
         if not pending_meeting:
-            # No meeting yet — create a new booking token.
-            print(f"[DEBUG step7] No pending meeting — calling create_meeting_with_token", flush=True)
+            # No meeting yet — call the dashboard endpoint to create a new booking token.
+            print(f"[DEBUG step7] No pending meeting — calling /api/meetings/create-token", flush=True)
             try:
-                token = await database.create_meeting_with_token(customer_phone)
-                print(f"[DEBUG step7] create_meeting_with_token returned token={token}", flush=True)
+                async with httpx.AsyncClient() as http:
+                    resp = await http.post(
+                        f"{DASHBOARD_URL}/api/meetings/create-token",
+                        json={"customer_phone": customer_phone},
+                        headers={"x-webhook-secret": WEBHOOK_SECRET},
+                        timeout=10.0,
+                    )
+                    resp.raise_for_status()
+                    token = resp.json()["token"]
+                print(f"[DEBUG step7] create-token returned token={token}", flush=True)
                 booking_url = f"{DASHBOARD_URL}/book/{token}"
                 meeting_message = (
-                    f"Thank you for contacting WAK Solutions! Would you like to schedule a "
-                    f"video meeting with one of our team? Book your preferred time here: "
-                    f"{booking_url}"
+                    f"Here's your personal booking link — valid for 24 hours: {booking_url}"
                 )
             except Exception as e:
                 import traceback
-                print(f"[DEBUG step7] create_meeting_with_token FAILED: {e}", flush=True)
+                print(f"[DEBUG step7] /api/meetings/create-token FAILED: {e}", flush=True)
                 print(traceback.format_exc(), flush=True)
         else:
             print(f"[DEBUG step7] Pending meeting already booked (scheduled_at={pending_meeting.get('scheduled_at')}) — skipping", flush=True)
