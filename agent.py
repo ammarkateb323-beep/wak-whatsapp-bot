@@ -143,12 +143,61 @@ def _is_resolved(reply: str) -> bool:
     return result
 
 
-_MEETING_KEYWORDS = ["meeting", "book", "schedule", "appointment", "slot", "call"]
+_MEETING_KEYWORDS = [
+    "meeting", "book", "schedule", "appointment", "slot",
+    # affirmatives — only used when bot just asked the meeting/agent question
+    "yes", "yeah", "sure", "ok", "okay", "yep", "please", "definitely", "great",
+    # Arabic affirmatives and meeting words
+    "نعم", "اوكي", "تمام", "حسنا", "ايوه", "اه", "موافق", "اجتماع", "موعد", "حجز",
+]
+
+# Phrases that indicate the last bot message was the meeting-or-agent question.
+_MEETING_QUESTION_PHRASES = [
+    "schedule a meeting", "book a meeting", "meeting with our team",
+    "speak with a customer service agent", "whatsapp agent",
+    "اجتماع", "موعد", "واتساب",
+]
+
+# Phrases that mean the AI is wrongly trying to collect a date/time manually.
+_AI_SCHEDULING_PHRASES = [
+    "what date", "what time", "when would you like", "preferred time",
+    "preferred date", "which day", "choose a date", "pick a time",
+    "let me know when", "what day works", "suggest a time",
+    "أي يوم", "متى تريد", "اختر موعد", "حدد وقت",
+]
 
 
-def _wants_meeting(message: str) -> bool:
+def _bot_just_asked_meeting_question(history: list) -> bool:
+    """Returns True if the most recent bot message contained the meeting/agent question."""
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = (msg.get("content") or "").lower()
+            return any(p in content for p in _MEETING_QUESTION_PHRASES)
+    return False
+
+
+def _wants_meeting(message: str, history: list | None = None) -> bool:
     lower = message.lower()
-    return any(kw in lower for kw in _MEETING_KEYWORDS)
+    # Always match explicit meeting keywords.
+    if any(kw in lower for kw in _MEETING_KEYWORDS):
+        # "yes/ok/sure" are only meeting-intent when bot just asked the question.
+        ambiguous = {"yes", "yeah", "sure", "ok", "okay", "yep", "please",
+                     "definitely", "great", "نعم", "اوكي", "تمام", "حسنا",
+                     "ايوه", "اه", "موافق"}
+        matched = {kw for kw in _MEETING_KEYWORDS if kw in lower}
+        non_ambiguous = matched - ambiguous
+        if non_ambiguous:
+            return True
+        # Only ambiguous words matched — require context.
+        if history and _bot_just_asked_meeting_question(history):
+            return True
+    return False
+
+
+def _ai_scheduling_manually(reply: str) -> bool:
+    """Returns True if OpenAI is trying to collect a date/time from the customer."""
+    lower = reply.lower()
+    return any(p in lower for p in _AI_SCHEDULING_PHRASES)
 
 
 # This tells OpenAI what tools are available to it.
@@ -176,30 +225,6 @@ TOOLS = [
                 },
                 "required": ["order_number"],  # OpenAI must provide this - it won't call
                 # the tool without it
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "confirm_meeting_time",
-            "description": (
-                "Confirm and save the date and time the customer has chosen for their video meeting. "
-                "Call this when the customer replies with their preferred date and time for the meeting."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "meeting_id": {
-                        "type": "integer",
-                        "description": "The ID of the pending meeting to update.",
-                    },
-                    "agreed_time": {
-                        "type": "string",
-                        "description": "The date and time the customer specified, e.g. 'Monday 10 AM', 'March 20 at 3 PM'.",
-                    },
-                },
-                "required": ["meeting_id", "agreed_time"],
             },
         },
     },
@@ -248,7 +273,7 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
 
     # Bug 2 fix: if the customer is asking about a meeting and already has
     # an unbooked pending meeting, skip OpenAI and resend the booking link.
-    if _wants_meeting(new_message):
+    if _wants_meeting(new_message, history):
         booking_url = None
         if pending_meeting and pending_meeting.get("scheduled_at") is None:
             # Unbooked meeting already exists — reuse its token.
@@ -368,9 +393,32 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
         # complaints, product inquiries, etc.
         final_reply = response_message.content
 
+    # Safety net: if OpenAI tried to collect a date/time manually, override
+    # with the booking link instead. The customer picks their slot on the page.
+    if _ai_scheduling_manually(final_reply):
+        print("[agent] AI tried to schedule manually — overriding with booking link", flush=True)
+        override_url = None
+        if pending_meeting and pending_meeting.get("scheduled_at") is None:
+            token = pending_meeting.get("meeting_token")
+            if token:
+                override_url = f"{DASHBOARD_URL}/book/{token}"
+        if not override_url:
+            try:
+                async with httpx.AsyncClient() as http:
+                    resp = await http.post(
+                        f"{DASHBOARD_URL}/api/meetings/create-token",
+                        json={"customer_phone": customer_phone},
+                        headers={"x-webhook-secret": WEBHOOK_SECRET},
+                        timeout=10.0,
+                    )
+                    resp.raise_for_status()
+                    override_url = f"{DASHBOARD_URL}/book/{resp.json()['token']}"
+            except Exception as e:
+                print(f"[agent] create-token failed in safety net: {e}", flush=True)
+        if override_url:
+            final_reply = f"Here's your personal booking link — valid for 24 hours: {override_url}"
+
     # Step 6: Save the exchange to memory
-    # Save both the customer's message and the bot's reply to the
-    # messages table so future calls have accurate history.
     await memory.save_message(
         customer_phone=customer_phone,
         direction="inbound",
