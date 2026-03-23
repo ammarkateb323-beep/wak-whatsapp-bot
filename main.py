@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -29,7 +30,9 @@ async def _link_delivery_loop():
         try:
             meetings = await database.get_meetings_to_notify()
             for m in meetings:
-                msg = f"Your meeting is starting soon! Join here: {m['meeting_link']}"
+                base_url = os.environ.get("RAILWAY_PUBLIC_URL", "")
+                meeting_url = f"{base_url}/meeting/{m['meeting_token']}" if m.get("meeting_token") else m["meeting_link"]
+                msg = f"Your meeting is starting soon! Join here: {meeting_url}"
                 await whatsapp.send_message(to=m["customer_phone"], text=msg)
                 await database.mark_link_sent(m["id"])
                 logger.info("Sent meeting link to %s (meeting %s)", m["customer_phone"], m["id"])

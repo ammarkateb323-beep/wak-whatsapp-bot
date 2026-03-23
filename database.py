@@ -165,7 +165,7 @@ async def get_meetings_to_notify() -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, customer_phone, meeting_link
+            SELECT id, customer_phone, meeting_link, meeting_token
             FROM meetings
             WHERE status != 'completed'
               AND link_sent = FALSE
