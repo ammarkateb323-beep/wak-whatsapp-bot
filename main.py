@@ -30,7 +30,8 @@ async def _link_delivery_loop():
         try:
             meetings = await database.get_meetings_to_notify()
             for m in meetings:
-                base_url = os.environ.get("RAILWAY_PUBLIC_URL", "")
+                raw_base = os.environ.get("RAILWAY_PUBLIC_URL", "").rstrip("/")
+                base_url = raw_base if raw_base.startswith("http") else f"https://{raw_base}"
                 meeting_url = f"{base_url}/meeting/{m['meeting_token']}" if m.get("meeting_token") else m["meeting_link"]
                 msg = f"Your meeting is starting soon! Join here: {meeting_url}"
                 await whatsapp.send_message(to=m["customer_phone"], text=msg)
