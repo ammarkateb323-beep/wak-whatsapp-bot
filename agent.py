@@ -158,6 +158,16 @@ _MEETING_QUESTION_PHRASES = [
     "اجتماع", "موعد", "واتساب",
 ]
 
+# Keywords that indicate the customer wants to speak to a human agent.
+_ESCALATION_KEYWORDS = [
+    "agent", "human", "person", "staff", "representative", "support",
+    "customer service", "talk to someone", "speak to someone", "real person",
+    "live agent", "live person", "call me", "phone call",
+    # Arabic
+    "وكيل", "انسان", "موظف", "خدمة العملاء", "دعم", "شخص حقيقي",
+    "تحدث مع شخص", "اريد شخص", "أريد شخص",
+]
+
 # Phrases that mean the AI is wrongly trying to collect a date/time manually.
 _AI_SCHEDULING_PHRASES = [
     "what date", "what time", "when would you like", "preferred time",
@@ -191,6 +201,36 @@ def _wants_meeting(message: str, history: list | None = None) -> bool:
         # Only ambiguous words matched — require context.
         if history and _bot_just_asked_meeting_question(history):
             return True
+    return False
+
+
+def _wants_escalation(message: str, history: list | None = None) -> bool:
+    """Returns True if the customer explicitly wants to speak to a human agent."""
+    lower = message.lower()
+    if any(kw in lower for kw in _ESCALATION_KEYWORDS):
+        return True
+    # Ambiguous affirmatives only count when the bot just offered the agent option.
+    ambiguous = {"yes", "yeah", "sure", "ok", "okay", "yep", "please",
+                 "نعم", "اوكي", "تمام", "ايوه", "اه", "موافق"}
+    if any(kw in lower for kw in ambiguous):
+        if history and _bot_just_offered_agent(history):
+            return True
+    return False
+
+
+def _bot_just_offered_agent(history: list) -> bool:
+    """Returns True if the most recent bot message explicitly offered the agent option."""
+    agent_phrases = [
+        "speak with a customer service agent",
+        "whatsapp agent",
+        "customer service agent on whatsapp",
+        "تحدث مع وكيل",
+        "خدمة العملاء على واتساب",
+    ]
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            content = (msg.get("content") or "").lower()
+            return any(p in content for p in agent_phrases)
     return False
 
 
@@ -266,6 +306,17 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
         customer_phone=customer_phone,
         message_text=new_message,
     )
+
+    # Escalation check: if the customer wants a human agent, notify the dashboard
+    # before anything else so the escalation appears in the inbox immediately.
+    if _wants_escalation(new_message, history):
+        await notify_dashboard(
+            event="escalation",
+            customer_phone=customer_phone,
+            message_text=new_message,
+            escalation_reason=new_message,
+        )
+        logger.info("Escalation triggered for %s", customer_phone)
 
     # Step 2: Check if a pending meeting already exists so we don't
     # send a second booking link for the same conversation.
