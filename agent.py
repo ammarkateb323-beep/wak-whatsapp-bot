@@ -315,6 +315,27 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
     # Step 3: Build the message list.
     system_content = await get_system_prompt()
 
+    # Inject the real booking URL into the system prompt so OpenAI never
+    # invents a fake one. Reuse an existing pending token if available;
+    # otherwise instruct OpenAI to output a known placeholder that we catch below.
+    _injected_booking_url = None
+    if pending_meeting and pending_meeting.get("scheduled_at") is None:
+        _t = pending_meeting.get("meeting_token")
+        if _t:
+            _injected_booking_url = f"{DASHBOARD_URL}/book/{_t}"
+    if _injected_booking_url:
+        system_content += (
+            f"\n\nBOOKING URL: {_injected_booking_url}\n"
+            "When sending the customer a meeting/booking link, use this exact URL. "
+            "Do NOT invent, shorten, or modify it."
+        )
+    else:
+        system_content += (
+            "\n\nWhen sending the customer a meeting/booking link, output the literal "
+            "text [BOOKING_LINK] as a placeholder — it will be replaced automatically. "
+            "Do NOT invent a URL."
+        )
+
     messages = (
         [{"role": "system", "content": system_content}]  # system prompt first
         + history  # past conversation
@@ -393,9 +414,9 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
         # complaints, product inquiries, etc.
         final_reply = response_message.content
 
-    # Safety net: if OpenAI left a [Booking Link] placeholder, replace it
+    # Safety net: if OpenAI left a booking placeholder, replace it
     # with the real URL so customers get a clickable link.
-    if final_reply and "[Booking Link]" in final_reply:
+    if final_reply and ("[Booking Link]" in final_reply or "[BOOKING_LINK]" in final_reply):
         print("[agent] AI output [Booking Link] placeholder — replacing with real URL", flush=True)
         link_url = None
         if pending_meeting and pending_meeting.get("scheduled_at") is None:
@@ -416,7 +437,7 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
             except Exception as e:
                 print(f"[agent] create-token failed in [Booking Link] replacement: {e}", flush=True)
         if link_url:
-            final_reply = final_reply.replace("[Booking Link]", link_url)
+            final_reply = final_reply.replace("[Booking Link]", link_url).replace("[BOOKING_LINK]", link_url)
 
     # Safety net: if OpenAI tried to collect a date/time manually, override
     # with the booking link instead. The customer picks their slot on the page.
