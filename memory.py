@@ -77,6 +77,9 @@ async def save_message(
     direction: str,
     message_text: str,
     sender: str = None,
+    media_type: str = None,
+    media_url: str = None,
+    transcription: str = None,
 ):
     """
     Saves a single message to the messages table.
@@ -85,11 +88,18 @@ async def save_message(
     bot's reply. The optional sender override is used for human agent
     replies coming from the dashboard.
 
+    For voice notes, pass media_type="audio", media_url=<playback URL>,
+    and transcription=<Whisper text>. message_text should also be set to
+    the transcription so load_history() continues to work unchanged.
+
     Args:
         customer_phone: The customer's WhatsApp number
         direction:      "inbound" or "outbound"
-        message_text:   The actual message content
+        message_text:   Text content (transcription for voice notes)
         sender:         Optional explicit sender override
+        media_type:     "audio" for voice notes, None for text
+        media_url:      URL to the stored audio file (None for text)
+        transcription:  Whisper output text (None for text messages)
     """
     if sender is None:
         sender = "customer" if direction == "inbound" else "ai"
@@ -97,13 +107,18 @@ async def save_message(
     async with database.pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO messages (customer_phone, direction, sender, message_text, created_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO messages
+              (customer_phone, direction, sender, message_text,
+               media_type, media_url, transcription, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
             """,
             customer_phone,
             direction,
             sender,
             message_text,
+            media_type,
+            media_url,
+            transcription,
         )
         # NOW() is a PostgreSQL function that inserts the current timestamp.
         # We let the DB set the time rather than Python to avoid timezone

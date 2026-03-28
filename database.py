@@ -187,6 +187,45 @@ async def mark_link_sent(meeting_id: int) -> None:
         )
 
 
+async def store_voice_note(audio_bytes: bytes, mime_type: str) -> str:
+    """
+    Persist voice note audio in the voice_notes table.
+
+    Storing in the database (rather than on disk) keeps audio durable
+    across restarts on platforms with ephemeral filesystems.
+
+    Returns the UUID string that uniquely identifies this recording.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO voice_notes (audio_data, mime_type)
+            VALUES ($1, $2)
+            RETURNING id::text
+            """,
+            audio_bytes,
+            mime_type,
+        )
+    return row["id"]
+
+
+async def get_voice_note(audio_id: str) -> dict | None:
+    """
+    Fetch a voice note by its UUID.
+
+    Returns a dict with keys 'audio_data' (bytes) and 'mime_type',
+    or None if the ID is not found.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT audio_data, mime_type FROM voice_notes WHERE id = $1::uuid",
+            audio_id,
+        )
+    if row is None:
+        return None
+    return {"audio_data": bytes(row["audio_data"]), "mime_type": row["mime_type"]}
+
+
 async def create_escalation(customer_phone: str, escalation_reason: str):
     """
     Inserts or updates an escalation record for a customer.

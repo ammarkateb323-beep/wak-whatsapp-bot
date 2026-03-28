@@ -100,30 +100,40 @@ Never send the booking link unless the customer explicitly agrees to schedule a 
 """.strip()
 
 
+import time as _time
+
 _cached_prompt: str | None = None
+_cache_ts: float = 0.0
+_CACHE_TTL: float = 60.0  # seconds
 
 
 async def get_system_prompt() -> str:
-    """Return the active system prompt from DB, falling back to the default."""
-    global _cached_prompt
-    if _cached_prompt is not None:
+    """Return the active system prompt from DB with a 60-second TTL cache."""
+    global _cached_prompt, _cache_ts
+    now = _time.monotonic()
+    if _cached_prompt is not None and (now - _cache_ts) < _CACHE_TTL:
         return _cached_prompt
     try:
         import asyncpg
         conn = await asyncpg.connect(DATABASE_URL)
         row = await conn.fetchrow("SELECT system_prompt FROM chatbot_config ORDER BY id LIMIT 1")
         await conn.close()
-        if row:
+        if row and row["system_prompt"]:
             _cached_prompt = row["system_prompt"]
+            _cache_ts = now
             return _cached_prompt
     except Exception as e:
         print(f"[agent] Could not load system prompt from DB: {e}", flush=True)
+    # If we already have a stale cache entry, prefer it over the hardcoded default
+    if _cached_prompt is not None:
+        return _cached_prompt
     return DEFAULT_SYSTEM_PROMPT
 
 
 def invalidate_prompt_cache() -> None:
-    global _cached_prompt
+    global _cached_prompt, _cache_ts
     _cached_prompt = None
+    _cache_ts = 0.0
 
 
 # Phrases that signal the bot has closed a conversation topic and a
@@ -271,7 +281,12 @@ TOOLS = [
 ]
 
 
-async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | None]:
+async def get_reply(
+    customer_phone: str,
+    new_message: str,
+    *,
+    _save_inbound: bool = True,
+) -> tuple[str, str | None]:
     """
     The main entry point for the agent. Called by main.py for every
     incoming WhatsApp message.
@@ -289,6 +304,9 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
     Args:
         customer_phone: The customer's WhatsApp number (e.g. "971501234567")
         new_message:    The text the customer just sent
+        _save_inbound:  If False, skip saving the inbound message here.
+                        Set to False when the caller has already saved it
+                        with extra metadata (e.g. voice note with media_url).
 
     Returns:
         A tuple of (reply, meeting_message).
@@ -351,11 +369,12 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
 
         if booking_url:
             booking_reply = f"Here's your personal booking link — valid for 24 hours: {booking_url}"
-            await memory.save_message(
-                customer_phone=customer_phone,
-                direction="inbound",
-                message_text=new_message,
-            )
+            if _save_inbound:
+                await memory.save_message(
+                    customer_phone=customer_phone,
+                    direction="inbound",
+                    message_text=new_message,
+                )
             await memory.save_message(
                 customer_phone=customer_phone,
                 direction="outbound",
@@ -516,11 +535,15 @@ async def get_reply(customer_phone: str, new_message: str) -> tuple[str, str | N
             final_reply = f"Here's your personal booking link — valid for 24 hours: {override_url}"
 
     # Step 6: Save the exchange to memory
-    await memory.save_message(
-        customer_phone=customer_phone,
-        direction="inbound",
-        message_text=new_message,
-    )
+    # _save_inbound=False means the caller (e.g. process_audio_message) already
+    # saved the inbound message with richer metadata (media_url, transcription).
+    # We only save here for ordinary text messages.
+    if _save_inbound:
+        await memory.save_message(
+            customer_phone=customer_phone,
+            direction="inbound",
+            message_text=new_message,
+        )
     await memory.save_message(
         customer_phone=customer_phone,
         direction="outbound",
