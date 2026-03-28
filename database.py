@@ -226,6 +226,24 @@ async def get_voice_note(audio_id: str) -> dict | None:
     return {"audio_data": bytes(row["audio_data"]), "mime_type": row["mime_type"]}
 
 
+async def auto_capture_contact(customer_phone: str) -> None:
+    """
+    Upsert a contact row for a customer who just sent an inbound message.
+    Does nothing if the number already exists in the contacts table.
+    Called by memory.save_message() for every inbound message so the
+    contacts list grows organically from real WhatsApp conversations.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO contacts (phone_number, source)
+            VALUES ($1, 'whatsapp')
+            ON CONFLICT (phone_number) DO NOTHING
+            """,
+            customer_phone,
+        )
+
+
 async def create_escalation(customer_phone: str, escalation_reason: str):
     """
     Inserts or updates an escalation record for a customer.

@@ -120,6 +120,10 @@ async def save_message(
             media_url,
             transcription,
         )
+
+    # Auto-add customer to contacts on first inbound message
+    if direction == "inbound":
+        await database.auto_capture_contact(customer_phone)
         # NOW() is a PostgreSQL function that inserts the current timestamp.
         # We let the DB set the time rather than Python to avoid timezone
         # mismatches between your server and the Neon database.
