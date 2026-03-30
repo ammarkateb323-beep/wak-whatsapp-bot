@@ -255,11 +255,11 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
         # ── Step 2: Store audio in DB ─────────────────────────────────────
         audio_id = await database.store_voice_note(audio_bytes, actual_mime)
 
-        # Build the playback URL using APP_URL (same env var used elsewhere)
-        raw_base = (os.environ.get("APP_URL") or "").rstrip("/")
-        if raw_base and not raw_base.startswith("http"):
-            raw_base = f"https://{raw_base}"
-        media_url = f"{raw_base}/audio/{audio_id}" if raw_base else None
+        # Serve audio through the dashboard's authenticated endpoint.
+        # Using an absolute URL so the browser can reach it from any origin.
+        raw_base = (os.environ.get("APP_URL") or "wak-agents.up.railway.app").rstrip("/")
+        base_url = raw_base if raw_base.startswith("http") else f"https://{raw_base}"
+        media_url = f"{base_url}/api/voice-notes/{audio_id}"
 
         # ── Step 3: Transcribe ────────────────────────────────────────────
         try:
