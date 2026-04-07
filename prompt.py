@@ -68,43 +68,53 @@ Never send the booking link unless the customer explicitly agrees to schedule a 
 # Cache state
 # ---------------------------------------------------------------------------
 
-_cached_prompt: str | None = None
-_cache_ts: float = 0.0
+# Per-company prompt cache: company_id → (prompt, timestamp)
+_cache: dict[int, tuple[str, float]] = {}
 _CACHE_TTL: float = 60.0  # seconds
 
 
-async def get_system_prompt() -> str:
-    """Return the active system prompt from DB with a 60-second TTL cache."""
-    global _cached_prompt, _cache_ts
+async def get_system_prompt(company_id: int = 1) -> str:
+    """Return the active system prompt for company_id with a 60-second TTL cache."""
+    global _cache
     now = _time.monotonic()
-    if _cached_prompt is not None and (now - _cache_ts) < _CACHE_TTL:
-        return _cached_prompt
+    cached = _cache.get(company_id)
+    if cached is not None and (now - cached[1]) < _CACHE_TTL:
+        return cached[0]
     try:
         conn = await asyncpg.connect(DATABASE_URL)
         row = await conn.fetchrow(
-            "SELECT system_prompt FROM chatbot_config ORDER BY id LIMIT 1"
+            "SELECT system_prompt FROM chatbot_config WHERE company_id = $1 ORDER BY id LIMIT 1",
+            company_id,
         )
         await conn.close()
         if row and row["system_prompt"]:
-            _cached_prompt = row["system_prompt"]
-            _cache_ts = now
-            logger.info("[INFO] [prompt] System prompt refreshed from database")
-            return _cached_prompt
+            _cache[company_id] = (row["system_prompt"], now)
+            logger.info(
+                "[INFO] [prompt] System prompt refreshed from database — company_id: %d",
+                company_id,
+            )
+            return _cache[company_id][0]
     except Exception as exc:
         logger.warning(
             "[WARN] [prompt] Could not load system prompt from DB — using cached/default: %s",
             exc,
         )
     # Prefer a stale cache entry over the hardcoded default.
-    if _cached_prompt is not None:
-        return _cached_prompt
-    logger.info("[INFO] [prompt] Using hardcoded default system prompt")
+    if cached is not None:
+        return cached[0]
+    logger.info("[INFO] [prompt] Using hardcoded default system prompt — company_id: %d", company_id)
     return DEFAULT_SYSTEM_PROMPT
 
 
-def invalidate_prompt_cache() -> None:
-    """Force the next get_system_prompt() call to reload from the database."""
-    global _cached_prompt, _cache_ts
-    _cached_prompt = None
-    _cache_ts = 0.0
-    logger.info("[INFO] [prompt] Prompt cache invalidated")
+def invalidate_prompt_cache(company_id: int | None = None) -> None:
+    """Force the next get_system_prompt() call to reload from the database.
+
+    Pass company_id to invalidate only that company's cache, or None to clear all.
+    """
+    global _cache
+    if company_id is not None:
+        _cache.pop(company_id, None)
+        logger.info("[INFO] [prompt] Prompt cache invalidated — company_id: %d", company_id)
+    else:
+        _cache.clear()
+        logger.info("[INFO] [prompt] Prompt cache fully invalidated")

@@ -1,5 +1,9 @@
 """
 database.py — asyncpg connection pool and all SQL query functions.
+
+Multi-tenancy: every write/read is scoped to a company_id.
+Use get_company_by_phone_number_id() at the start of every inbound
+message handler to resolve the company from the WhatsApp phone number ID.
 """
 
 import logging
@@ -14,6 +18,9 @@ logger = logging.getLogger(__name__)
 
 # Holds the pool once created by main.py on startup.
 pool: asyncpg.Pool | None = None
+
+# In-process cache: phone_number_id → company_id (avoids a DB round-trip per message)
+_company_cache: dict[str, int] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -51,13 +58,61 @@ async def close_pool() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Multi-tenancy: company resolution
+# ---------------------------------------------------------------------------
+
+
+async def get_company_by_phone_number_id(phone_number_id: str) -> int:
+    """
+    Looks up the company_id that owns this WhatsApp phone_number_id.
+    Results are cached in-process so only the first message per process
+    triggers a DB round-trip.
+
+    Falls back to company_id = 1 if no match is found (safe during migration
+    while existing companies haven't had their whatsapp_phone_number_id set).
+    """
+    if phone_number_id in _company_cache:
+        return _company_cache[phone_number_id]
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id FROM companies
+                WHERE whatsapp_phone_number_id = $1 AND is_active = true
+                LIMIT 1
+                """,
+                phone_number_id,
+            )
+        company_id = row["id"] if row else 1
+        if not row:
+            logger.warning(
+                "[WARN] [database] No company found for phone_number_id %s — falling back to company_id=1",
+                phone_number_id,
+            )
+        else:
+            logger.info(
+                "[INFO] [database] Resolved company_id=%d for phone_number_id=%s",
+                company_id,
+                phone_number_id,
+            )
+        _company_cache[phone_number_id] = company_id
+        return company_id
+    except Exception as exc:
+        logger.error(
+            "[ERROR] [database] get_company_by_phone_number_id failed: %s", exc, exc_info=True
+        )
+        return 1  # safe fallback — never crash an inbound message
+
+
+# ---------------------------------------------------------------------------
 # Orders
 # ---------------------------------------------------------------------------
 
 
-async def lookup_order(order_number: str) -> dict:
+async def lookup_order(order_number: str, company_id: int = 1) -> dict:
     """
-    Query the orders table for a given order_number.
+    Query the orders table for a given order_number scoped to company_id.
     Called by agent.py when OpenAI triggers the lookup_order tool.
     """
     try:
@@ -66,9 +121,10 @@ async def lookup_order(order_number: str) -> dict:
                 """
                 SELECT order_number, status, details, created_at
                 FROM orders
-                WHERE order_number = $1
+                WHERE order_number = $1 AND company_id = $2
                 """,
                 order_number,
+                company_id,
             )
         if row is None:
             logger.info("[INFO] [database] Order not found — order_number: %s", order_number)
@@ -100,7 +156,7 @@ async def lookup_order(order_number: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def create_meeting_with_token(customer_phone: str) -> str:
+async def create_meeting_with_token(customer_phone: str, company_id: int = 1) -> str:
     """
     Creates a meeting record with a unique booking token (24 hr expiry).
     Returns the token UUID string.
@@ -112,12 +168,13 @@ async def create_meeting_with_token(customer_phone: str) -> str:
             await conn.execute(
                 """
                 INSERT INTO meetings
-                  (customer_phone, meeting_link, meeting_token, token_expires_at, status, created_at)
-                VALUES ($1, '', $2, $3, 'pending', NOW())
+                  (customer_phone, meeting_link, meeting_token, token_expires_at, status, company_id, created_at)
+                VALUES ($1, '', $2, $3, 'pending', $4, NOW())
                 """,
                 customer_phone,
                 token,
                 expires_at,
+                company_id,
             )
         logger.info("[INFO] [database] Meeting token created — token: %s", token[:8] + "...")
         return token
@@ -126,9 +183,9 @@ async def create_meeting_with_token(customer_phone: str) -> str:
         raise
 
 
-async def get_pending_meeting(customer_phone: str) -> dict | None:
+async def get_pending_meeting(customer_phone: str, company_id: int = 1) -> dict | None:
     """
-    Returns the latest pending meeting for a customer, or None.
+    Returns the latest pending meeting for a customer within the given company, or None.
     """
     try:
         async with pool.acquire() as conn:
@@ -136,11 +193,12 @@ async def get_pending_meeting(customer_phone: str) -> dict | None:
                 """
                 SELECT id, meeting_link, agreed_time, meeting_token, scheduled_at
                 FROM meetings
-                WHERE customer_phone = $1 AND status = 'pending'
+                WHERE customer_phone = $1 AND status = 'pending' AND company_id = $2
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
                 customer_phone,
+                company_id,
             )
         if row is None:
             return None
@@ -301,20 +359,21 @@ async def get_voice_note(audio_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-async def auto_capture_contact(customer_phone: str) -> None:
+async def auto_capture_contact(customer_phone: str, company_id: int = 1) -> None:
     """
     Upsert a contact row for a customer who just sent an inbound message.
-    Does nothing if the number already exists in the contacts table.
+    Scoped to company_id. Does nothing if the number already exists for this company.
     """
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO contacts (phone_number, source)
-                VALUES ($1, 'whatsapp')
+                INSERT INTO contacts (phone_number, source, company_id)
+                VALUES ($1, 'whatsapp', $2)
                 ON CONFLICT (phone_number) DO NOTHING
                 """,
                 customer_phone,
+                company_id,
             )
     except Exception as exc:
         logger.error(
@@ -328,17 +387,17 @@ async def auto_capture_contact(customer_phone: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def create_escalation(customer_phone: str, escalation_reason: str) -> None:
+async def create_escalation(customer_phone: str, escalation_reason: str, company_id: int = 1) -> None:
     """
-    Inserts or updates an escalation record for a customer.
+    Inserts or updates an escalation record for a customer, scoped to company_id.
     Uses ON CONFLICT to avoid duplicates if the customer escalates twice.
     """
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO escalations (customer_phone, escalation_reason, status, created_at)
-                VALUES ($1, $2, 'open', NOW())
+                INSERT INTO escalations (customer_phone, escalation_reason, status, company_id, created_at)
+                VALUES ($1, $2, 'open', $3, NOW())
                 ON CONFLICT (customer_phone)
                 DO UPDATE SET
                     escalation_reason = EXCLUDED.escalation_reason,
@@ -347,8 +406,9 @@ async def create_escalation(customer_phone: str, escalation_reason: str) -> None
                 """,
                 customer_phone,
                 escalation_reason,
+                company_id,
             )
-        logger.info("[INFO] [database] Escalation created/updated")
+        logger.info("[INFO] [database] Escalation created/updated — company_id: %d", company_id)
     except Exception as exc:
         logger.error(
             "[ERROR] [database] create_escalation failed: %s", exc, exc_info=True

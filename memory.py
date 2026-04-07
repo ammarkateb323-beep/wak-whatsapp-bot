@@ -16,7 +16,7 @@ def _mask_phone(phone: str) -> str:
     return f"****{phone[-4:]}"
 
 
-async def load_history(customer_phone: str) -> list[dict]:
+async def load_history(customer_phone: str, company_id: int = 1) -> list[dict]:
     """
     Loads the last MEMORY_WINDOW messages for a customer from the messages table
     and returns them formatted as OpenAI conversation history.
@@ -34,7 +34,7 @@ async def load_history(customer_phone: str) -> list[dict]:
                            message_text,
                            created_at
                     FROM   messages
-                    WHERE  customer_phone = $1
+                    WHERE  customer_phone = $1 AND company_id = $3
                     ORDER  BY created_at DESC
                     LIMIT  $2
                 ) recent_messages
@@ -42,6 +42,7 @@ async def load_history(customer_phone: str) -> list[dict]:
                 """,
                 customer_phone,
                 MEMORY_WINDOW,
+                company_id,
             )
 
         if not rows:
@@ -83,6 +84,7 @@ async def save_message(
     media_type: str = None,
     media_url: str = None,
     transcription: str = None,
+    company_id: int = 1,
 ) -> None:
     """
     Saves a single message to the messages table.
@@ -95,6 +97,7 @@ async def save_message(
         media_type:     "audio" for voice notes, None for text.
         media_url:      URL to stored audio (None for text).
         transcription:  Whisper output (None for text messages).
+        company_id:     The company this message belongs to.
     """
     if sender is None:
         sender = "customer" if direction == "inbound" else "ai"
@@ -105,8 +108,8 @@ async def save_message(
                 """
                 INSERT INTO messages
                   (customer_phone, direction, sender, message_text,
-                   media_type, media_url, transcription, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                   media_type, media_url, transcription, company_id, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                 """,
                 customer_phone,
                 direction,
@@ -115,6 +118,7 @@ async def save_message(
                 media_type,
                 media_url,
                 transcription,
+                company_id,
             )
         logger.info(
             "[INFO] [memory] Message saved — phone: %s, direction: %s, sender: %s, media_type: %s",
@@ -135,4 +139,4 @@ async def save_message(
 
     # Auto-add customer to contacts on first inbound message.
     if direction == "inbound":
-        await database.auto_capture_contact(customer_phone)
+        await database.auto_capture_contact(customer_phone, company_id)

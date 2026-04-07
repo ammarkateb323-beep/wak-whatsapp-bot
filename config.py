@@ -15,7 +15,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 # The model that handles conversations. gpt-4.1-mini is fast, cheap,
 # and fully supports tool calling — which we need for order lookup.
 # To upgrade to gpt-5-mini later, change only this one line.
-OPENAI_MODEL = "gpt-4.1-mini"
+OPENAI_MODEL = "gpt-4o-mini"
 
 
 # ── Neon (PostgreSQL) ─────────────────────────────────────────────────

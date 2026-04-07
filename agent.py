@@ -172,7 +172,7 @@ async def get_reply(
             return booking_reply, None
 
     # ── Step 5: Build message list ────────────────────────────────────────────
-    system_content = await get_system_prompt()
+    system_content = await get_system_prompt(company_id)
 
     # Inject a real booking URL into the system prompt so OpenAI never
     # invents a fake one. If no pending token exists, instruct OpenAI to

@@ -118,6 +118,9 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
     """
     Meta incoming-message webhook.
     Returns 200 immediately, processes in background to prevent Meta retries.
+
+    Resolves company_id from the WhatsApp phone_number_id in the webhook metadata.
+    Falls back to company_id=1 if the phone number is not yet registered.
     """
     body = await request.json()
 
@@ -130,6 +133,10 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         if not messages_list:
             logger.info("[INFO] [main] No messages in payload — likely a status update, ignoring")
             return JSONResponse(content={"status": "ok"}, status_code=200)
+
+        # Resolve company from the WhatsApp phone_number_id in the webhook metadata.
+        phone_number_id = value.get("metadata", {}).get("phone_number_id", "")
+        company_id = await database.get_company_by_phone_number_id(phone_number_id)
 
         message = messages_list[0]
         msg_type = message.get("type")
@@ -148,10 +155,11 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
                 )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             logger.info(
-                "[INFO] [main] Message received — phone: %s, type: text",
+                "[INFO] [main] Message received — phone: %s, type: text, company_id: %d",
                 mask_phone(customer_phone),
+                company_id,
             )
-            background_tasks.add_task(process_message, customer_phone, message_text)
+            background_tasks.add_task(process_message, customer_phone, message_text, company_id)
 
         elif msg_type == "audio":
             audio_data = message.get("audio", {})
@@ -164,12 +172,13 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
                 )
                 return JSONResponse(content={"status": "ok"}, status_code=200)
             logger.info(
-                "[INFO] [main] Message received — phone: %s, type: audio, mime: %s",
+                "[INFO] [main] Message received — phone: %s, type: audio, mime: %s, company_id: %d",
                 mask_phone(customer_phone),
                 mime_type,
+                company_id,
             )
             background_tasks.add_task(
-                process_audio_message, customer_phone, media_id, mime_type
+                process_audio_message, customer_phone, media_id, mime_type, company_id
             )
 
         else:
@@ -204,6 +213,7 @@ async def send_agent_message(request: Request):
     body = await request.json()
     customer_phone = body.get("customer_phone")
     message_text = body.get("message")
+    company_id = int(body.get("company_id", 1))
 
     if not customer_phone or not message_text:
         return JSONResponse(content={"error": "Missing fields"}, status_code=400)
@@ -215,6 +225,7 @@ async def send_agent_message(request: Request):
             direction="outbound",
             message_text=message_text,
             sender="agent",
+            company_id=company_id,
         )
         logger.info(
             "[INFO] [main] Agent message sent — phone: %s, type: text",
@@ -236,7 +247,7 @@ async def send_agent_message(request: Request):
 # ---------------------------------------------------------------------------
 
 
-async def process_message(customer_phone: str, message_text: str):
+async def process_message(customer_phone: str, message_text: str, company_id: int = 1):
     """Generate and send a bot reply for an inbound text message."""
     try:
         logger.info(
@@ -247,6 +258,7 @@ async def process_message(customer_phone: str, message_text: str):
         reply, meeting_message = await agent.get_reply(
             customer_phone=customer_phone,
             new_message=message_text,
+            company_id=company_id,
         )
 
         await whatsapp.send_message(to=customer_phone, text=reply)
@@ -262,6 +274,7 @@ async def process_message(customer_phone: str, message_text: str):
                 direction="outbound",
                 message_text=meeting_message,
                 sender="ai",
+                company_id=company_id,
             )
             logger.info(
                 "[INFO] [main] Meeting invitation sent — phone: %s",
@@ -277,7 +290,7 @@ async def process_message(customer_phone: str, message_text: str):
         )
 
 
-async def process_audio_message(customer_phone: str, media_id: str, mime_type: str):
+async def process_audio_message(customer_phone: str, media_id: str, mime_type: str, company_id: int = 1):
     """
     Handle an incoming WhatsApp voice note end-to-end:
     1. Download audio from Meta's CDN.
@@ -338,6 +351,7 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
                 media_type="audio",
                 media_url=media_url,
                 transcription=None,
+                company_id=company_id,
             )
             await whatsapp.send_message(
                 to=customer_phone,
@@ -361,6 +375,7 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
                 media_type="audio",
                 media_url=media_url,
                 transcription="",
+                company_id=company_id,
             )
             await whatsapp.send_message(
                 to=customer_phone,
@@ -380,6 +395,7 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
             media_type="audio",
             media_url=media_url,
             transcription=transcription,
+            company_id=company_id,
         )
 
         # Step 5: Run transcription through the normal bot flow
@@ -387,6 +403,7 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
             customer_phone=customer_phone,
             new_message=transcription,
             _save_inbound=False,
+            company_id=company_id,
         )
 
         await whatsapp.send_message(to=customer_phone, text=reply)
@@ -402,6 +419,7 @@ async def process_audio_message(customer_phone: str, media_id: str, mime_type: s
                 direction="outbound",
                 message_text=meeting_message,
                 sender="ai",
+                company_id=company_id,
             )
 
     except Exception as exc:
